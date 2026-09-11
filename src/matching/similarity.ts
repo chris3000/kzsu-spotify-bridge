@@ -122,15 +122,33 @@ export function titleSimilarity(ourTitle: string, candidateTitle: string): numbe
   return best;
 }
 
+/** Drop a trailing "Feat./Featuring/Ft. …" clause from an artist credit. */
+export function stripFeaturedArtists(artist: string): string {
+  const stripped = artist
+    .replace(/[([]?\s*\b(?:feat\.?|featuring|ft\.?)\s+.*$/i, '')
+    .replace(/[,&+]\s*$/, '')
+    .trim();
+  return stripped.length > 0 ? stripped : artist;
+}
+
 /**
- * Artist similarity: our artist string (possibly a joint billing like
- * "A & B") against each candidate artist individually and all of them joined.
+ * Artist similarity: our artist string (possibly a joint billing like "A & B"
+ * or "A Feat. B") against each candidate artist individually and all of them
+ * joined. The feed embeds featured artists in the artist field; Spotify
+ * credits them separately, so we also compare with the feat-clause stripped.
  */
 export function artistSimilarity(
   ourArtist: string,
   candidateArtists: string[],
 ): number {
-  const variants = [...candidateArtists];
-  if (candidateArtists.length > 1) variants.push(candidateArtists.join(' '));
-  return Math.max(0, ...variants.map((a) => stringSimilarity(ourArtist, a)));
+  const ours = [...new Set([ourArtist, stripFeaturedArtists(ourArtist)])];
+  const theirs = [...candidateArtists];
+  if (candidateArtists.length > 1) theirs.push(candidateArtists.join(' '));
+  let best = 0;
+  for (const a of ours) {
+    for (const b of theirs) {
+      best = Math.max(best, stringSimilarity(a, b));
+    }
+  }
+  return best;
 }

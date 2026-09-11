@@ -86,4 +86,12 @@ describe('artistSimilarity', () => {
   it('penalizes name extensions like tribute bands', () => {
     expect(artistSimilarity('Big Thief', ['Big Thief Tribute Band'])).toBeLessThan(0.6);
   });
+
+  it('strips featuring clauses embedded in the feed artist field', () => {
+    expect(artistSimilarity('Thundercat Feat. Flying Lotus', ['Thundercat'])).toBe(1);
+    expect(
+      artistSimilarity('Massive Attack Feat. Robert Del Naja', ['Massive Attack']),
+    ).toBe(1);
+    expect(artistSimilarity('Bloodest Saxophone ft The Get Down', ['Bloodest Saxophone'])).toBe(1);
+  });
 });
