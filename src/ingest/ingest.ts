@@ -5,6 +5,7 @@ import { kvSet, type DB } from '../db/client.js';
 import { normalize } from '../matching/similarity.js';
 import { inferDates, type FeedEntry } from './dateInference.js';
 import { fetchFeed } from './feed.js';
+import { isNonSong } from './filter.js';
 import { normKey, parseTitle } from './parse.js';
 
 export interface IngestResult {
@@ -65,9 +66,10 @@ export function ingestEntries(
 
   db.transaction(() => {
     for (const e of dated) {
+      if (isNonSong(e.artist, e.title)) continue; // news/PSA cart, not a song
       const { title, year } = parseTitle(e.title);
       const key = normKey(e.artist, title);
-      if (key === '|' || normalize(e.artist) === '') continue; // unusable entry
+      if (key === '|') continue; // unusable entry
 
       const created = insertTrack.run(
         title,
