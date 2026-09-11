@@ -1,0 +1,35 @@
+# fly.toml — single always-on machine; SQLite is single-writer, never scale > 1.
+app = "kzsu-spotify-bridge"
+primary_region = "sjc"
+
+[build]
+
+[env]
+  PORT = "8080"
+  DATABASE_PATH = "/data/kzsu.db"
+  FEED_URL = "http://kzsu.rocks/songs"
+  DYNAMIC_PLAYLIST_NAME = "Indie Rock Dynamic Playlist"
+  YESTERDAY_PLAYLIST_NAME = "Zootopia- Yesterday's Songs"
+  PLAYLIST_SIZE = "150"
+  COOLDOWN_DAYS = "14"
+  TZ_STATION = "America/Los_Angeles"
+  # Set PUBLIC_BASE_URL to your real app URL after `fly launch`:
+  PUBLIC_BASE_URL = "https://kzsu-spotify-bridge.fly.dev"
+
+[mounts]
+  source = "data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "15s"
+    method = "GET"
+    path = "/healthz"

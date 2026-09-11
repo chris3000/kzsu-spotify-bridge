@@ -1,0 +1,39 @@
+{
+  "name": "kzsu-spotify-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Polls KZSU Zootopia's recent-songs feed, matches songs to streaming services, and builds daily Spotify playlists.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
+    "start": "node --env-file-if-exists=.env dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "ingest:once": "tsx --env-file-if-exists=.env src/scripts/ingest-once.ts",
+    "playlist:once": "tsx --env-file-if-exists=.env src/scripts/playlist-once.ts"
+  },
+  "dependencies": {
+    "@date-fns/tz": "^1.2.0",
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/formbody": "^8.0.2",
+    "better-sqlite3": "^12.2.0",
+    "date-fns": "^4.1.0",
+    "fastify": "^5.3.2",
+    "node-cron": "^4.2.1",
+    "pino": "^9.6.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.13.10",
+    "pino-pretty": "^13.0.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.9"
+  }
+}

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+data/
+.env
+*.db
+*.db-shm
+*.db-wal
+
+# Original Firestore export, import script, and notes — never publish
+assets/old_db/
+IMPORT_NOTES.local.md
+local/

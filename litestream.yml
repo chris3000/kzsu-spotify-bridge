@@ -1,0 +1,10 @@
+# Litestream config (informational — run.sh passes the replica URL on the
+# command line, which avoids duplicating bucket config; keep this file for
+# retention tuning if you switch to `litestream replicate -config`).
+dbs:
+  - path: /data/kzsu.db
+    replicas:
+      - url: ${LITESTREAM_REPLICA_URL}
+        sync-interval: 10s
+        retention: 72h
+        snapshot-interval: 24h
