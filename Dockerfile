@@ -9,6 +9,7 @@ RUN npm run build && npm prune --omit=dev
 
 # Runtime stage
 FROM node:22-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=litestream/litestream:0.3 /usr/local/bin/litestream /usr/local/bin/litestream
 WORKDIR /app
 ENV NODE_ENV=production
