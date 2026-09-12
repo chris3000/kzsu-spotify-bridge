@@ -119,6 +119,7 @@ main { padding: 26px 30px 56px; min-width: 0; }
 .cause .name { color: var(--text2); }
 .cause .track { height: 6px; border-radius: 3px; background: var(--border); display: block; }
 .cause .fill { display: block; height: 6px; border-radius: 3px; background: var(--bar); }
+.cause .fill.accent { background: var(--accent); }
 .cause .n { font-family: var(--mono); font-size: 12px; color: var(--text3); }
 
 .tcard { margin-top: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }

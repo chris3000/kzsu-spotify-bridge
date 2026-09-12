@@ -148,6 +148,42 @@ export function registerDashboard(
       )
       .all() as { track_id: number; played_at: number; raw_artist: string; raw_title: string; status: string }[];
 
+    // Selection health: how the daily lottery's pool looks right now.
+    const cooldownCutoff = now - config.COOLDOWN_DAYS * DAY;
+    const eligible = count(
+      `SELECT COUNT(*) c FROM tracks t
+       JOIN provider_matches pm ON pm.track_id = t.id AND pm.provider = 'spotify' AND pm.uri IS NOT NULL
+       WHERE t.status = 'matched'
+         AND (t.last_selected_at IS NULL OR t.last_selected_at < ?)`,
+      cooldownCutoff,
+    );
+    const inCooldown = count(
+      `SELECT COUNT(*) c FROM tracks WHERE status = 'matched' AND last_selected_at >= ?`,
+      cooldownCutoff,
+    );
+    const neverPicked = count(
+      `SELECT COUNT(*) c FROM tracks WHERE status = 'matched' AND times_selected = 0`,
+    );
+    const pickedEver = matched - neverPicked;
+    const sumPicks =
+      (db.prepare('SELECT COALESCE(SUM(times_selected), 0) s FROM tracks').get() as {
+        s: number;
+      }).s;
+    const repeatPicks = sumPicks - pickedEver;
+    const pct = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 100) : 0);
+    const health: { name: string; n: string; w: number; accent?: boolean }[] = [
+      { name: 'Eligible tonight', n: fmtNum(eligible), w: pct(eligible, matched), accent: true },
+      { name: 'In cooldown (14d)', n: fmtNum(inCooldown), w: pct(inCooldown, matched) },
+      { name: 'Never picked', n: fmtNum(neverPicked), w: pct(neverPicked, matched) },
+      {
+        name: 'Catalog coverage',
+        n: `${pct(pickedEver, matched)}%`,
+        w: pct(pickedEver, matched),
+        accent: true,
+      },
+      { name: 'Repeat picks', n: fmtNum(repeatPicks), w: pct(repeatPicks, Math.max(sumPicks, 1)) },
+    ];
+
     const body = html`
       <header class="page-head">
         <div>
@@ -197,6 +233,25 @@ export function registerDashboard(
                 .map(
                   (b) =>
                     `<div class="bar" style="height:${Math.round((b.n / barMax) * 100)}%" title="${esc(`${b.n} matched · ${b.label}`)}"></div>`,
+                )
+                .join(''),
+            )}
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>Selection health</h2>
+            <span class="tag">pool of ${fmtNum(matched)}</span>
+          </div>
+          <div class="causes">
+            ${raw(
+              health
+                .map(
+                  (h) => html`<div class="cause">
+                    <span class="name">${h.name}</span>
+                    <span class="track"><span class="fill${h.accent ? ' accent' : ''}" style="width:${h.w}%"></span></span>
+                    <span class="n">${h.n}</span>
+                  </div>`,
                 )
                 .join(''),
             )}

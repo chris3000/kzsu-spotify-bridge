@@ -85,6 +85,9 @@ describe('web server', () => {
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain('Tracks matched');
     expect(res.body).toContain('spotify · linked');
+    expect(res.body).toContain('Selection health');
+    expect(res.body).toContain('Eligible tonight');
+    expect(res.body).toContain('Never picked');
   });
 
   it('shows a connect link when Spotify is not authorized', async () => {
