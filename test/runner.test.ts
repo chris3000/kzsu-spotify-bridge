@@ -117,6 +117,23 @@ describe('runPlaylistJob dynamic', () => {
     expect(outcome.error).toContain('not authorized');
   });
 
+  it('sets a description containing the last-updated date', async () => {
+    await runPlaylistJob(db, [provider], config, 'dynamic', 'cron', testLogger, NOW, seededRng());
+    const desc = [...provider.descriptions.values()][0]!;
+    expect(desc).toContain('Last updated Sep 10, 2026');
+    expect(desc).toContain('An eclectic music mix of college radio rock');
+  });
+
+  it('a failed description update does not fail the run', async () => {
+    provider.setPlaylistDescription = async () => {
+      throw new Error('spotify hiccup');
+    };
+    const outcome = await runPlaylistJob(
+      db, [provider], config, 'dynamic', 'cron', testLogger, NOW, seededRng(),
+    );
+    expect(outcome.status).toBe('success');
+  });
+
   it('reuses the cached playlist id across runs', async () => {
     await runPlaylistJob(db, [provider], config, 'dynamic', 'cron', testLogger, NOW, seededRng());
     await runPlaylistJob(
@@ -161,6 +178,9 @@ describe('runPlaylistJob yesterday', () => {
       'spotify:track:sp1',
       'spotify:track:sp2',
     ]);
+    const desc = [...provider.descriptions.values()][0]!;
+    expect(desc).toContain('on Sep 9, 2026');
+    expect(desc).toContain('Last updated Sep 10, 2026');
   });
 
   it('fails (and can retry) when yesterday had no matched plays', async () => {

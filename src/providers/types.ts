@@ -28,4 +28,6 @@ export interface MusicProvider {
   ensurePlaylist(name: string, cachedId?: string | null): Promise<{ id: string; url: string }>;
   /** Replace the playlist's entire contents with the given track URIs. */
   replacePlaylistItems(playlistId: string, uris: string[]): Promise<void>;
+  /** Update the playlist's public description. */
+  setPlaylistDescription(playlistId: string, description: string): Promise<void>;
 }

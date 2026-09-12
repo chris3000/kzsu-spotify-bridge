@@ -97,10 +97,15 @@ export class SpotifyProvider implements MusicProvider {
         };
       } catch (err) {
         if (!(err instanceof SpotifyApiError && err.status === 404)) throw err;
-        // Playlist deleted — fall through and recreate.
+        // Playlist deleted — fall through to name lookup / create.
       }
     }
     const me = await this.client.request<{ id: string }>('GET', '/me');
+    // Reuse an existing playlist with this exact name (owned by the user)
+    // before ever creating one — guarantees a single stable playlist per
+    // kind even on first boot or after a lost kv cache.
+    const existing = await this.findOwnPlaylistByName(me.id, name);
+    if (existing) return existing;
     const created = await this.client.request<{
       id: string;
       external_urls?: { spotify?: string };
@@ -115,6 +120,39 @@ export class SpotifyProvider implements MusicProvider {
         created.external_urls?.spotify ??
         `https://open.spotify.com/playlist/${created.id}`,
     };
+  }
+
+  private async findOwnPlaylistByName(
+    meId: string,
+    name: string,
+  ): Promise<{ id: string; url: string } | null> {
+    const target = name.trim();
+    let path: string | null = '/me/playlists?limit=50';
+    while (path) {
+      const page: {
+        items: {
+          id: string;
+          name: string;
+          owner?: { id?: string };
+          external_urls?: { spotify?: string };
+        }[];
+        next: string | null;
+      } = await this.client.request('GET', path);
+      for (const p of page.items) {
+        if (p.name.trim() === target && p.owner?.id === meId) {
+          return {
+            id: p.id,
+            url: p.external_urls?.spotify ?? `https://open.spotify.com/playlist/${p.id}`,
+          };
+        }
+      }
+      path = page.next ? page.next.replace('https://api.spotify.com/v1', '') : null;
+    }
+    return null;
+  }
+
+  async setPlaylistDescription(playlistId: string, description: string): Promise<void> {
+    await this.client.request('PUT', `/playlists/${playlistId}`, { description });
   }
 
   async replacePlaylistItems(playlistId: string, uris: string[]): Promise<void> {

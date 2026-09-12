@@ -24,6 +24,29 @@ export function pacificDateString(epochSeconds: number, timeZone: string): strin
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+function prettyDate(epochSeconds: number, timeZone: string): string {
+  return new Date(epochSeconds * 1000).toLocaleDateString('en-US', {
+    timeZone,
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+/** Best-effort: a failed description update should not fail the run. */
+async function updateDescription(
+  provider: MusicProvider,
+  playlistId: string,
+  description: string,
+  log: Logger,
+): Promise<void> {
+  try {
+    await provider.setPlaylistDescription(playlistId, description);
+  } catch (err) {
+    log.warn({ playlistId, err }, 'failed to update playlist description');
+  }
+}
+
 /** Epoch bounds [start, end) of the station-local calendar day containing `epochSeconds - dayOffset days`. */
 function localDayBounds(
   epochSeconds: number,
@@ -138,6 +161,12 @@ async function runDynamic(
     playlist.id,
     selection.tracks.map((t) => t.uri),
   );
+  await updateDescription(
+    provider,
+    playlist.id,
+    `An eclectic music mix of college radio rock. A full day of music, updated daily. Last updated ${prettyDate(now, config.TZ_STATION)}.`,
+    log,
+  );
 
   const notes =
     selection.fallbackTier > 0 ? `fallback tier ${selection.fallbackTier}` : null;
@@ -209,6 +238,12 @@ async function runYesterday(
   await provider.replacePlaylistItems(
     playlist.id,
     rows.map((r) => r.uri),
+  );
+  await updateDescription(
+    provider,
+    playlist.id,
+    `Every song identified on KZSU Zootopia on ${prettyDate(start, config.TZ_STATION)}. Last updated ${prettyDate(now, config.TZ_STATION)}.`,
+    log,
   );
 
   db.transaction(() => {

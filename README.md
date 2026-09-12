@@ -4,10 +4,10 @@ Polls KZSU Zootopia's recent-songs feed (`http://kzsu.rocks/songs`) hourly,
 matches each song to Spotify, and rebuilds two playlists every morning at
 3:00 AM Pacific:
 
-- **Indie Rock Dynamic Playlist** — 150 tracks chosen by a weighted lottery
+- **College Rock Dynamic Playlist** — 150 tracks chosen by a weighted lottery
   (fewer past picks and longer time since last pick → higher odds; 14-day
   cooldown between picks of the same track).
-- **Zootopia- Yesterday's Songs** — everything identified from yesterday's
+- **KZSU Zootopia- Yesterday's Songs** — everything identified from yesterday's
   airplay, in airing order.
 
 A password-protected dashboard shows library stats, filterable track/play

@@ -63,4 +63,10 @@ export class FakeProvider implements MusicProvider {
     pl.uris = [...uris];
     this.replaceCalls.push({ playlistId, uris: [...uris] });
   }
+
+  descriptions = new Map<string, string>();
+
+  async setPlaylistDescription(playlistId: string, description: string): Promise<void> {
+    this.descriptions.set(playlistId, description);
+  }
 }
