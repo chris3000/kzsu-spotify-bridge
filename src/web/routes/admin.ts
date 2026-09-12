@@ -3,7 +3,11 @@ import type { Logger } from 'pino';
 import type { Config } from '../../config.js';
 import type { DB } from '../../db/client.js';
 import { resetRetrySchedule, retryUnmatched } from '../../matching/retry.js';
-import { runPlaylistJob, type RunKind } from '../../playlists/runner.js';
+import {
+  runAllPlaylists,
+  runPlaylistJob,
+  type RunKind,
+} from '../../playlists/runner.js';
 import type { ProviderRegistry } from '../../providers/registry.js';
 
 export function registerAdmin(
@@ -18,13 +22,10 @@ export function registerAdmin(
     async (req, reply) => {
       // Run in the request so the redirect lands after the run is recorded;
       // Spotify pushes take a few seconds at most.
-      const kinds: RunKind[] =
-        req.query.kind === 'all'
-          ? ['dynamic', 'yesterday']
-          : req.query.kind === 'yesterday'
-            ? ['yesterday']
-            : ['dynamic'];
-      for (const kind of kinds) {
+      if (req.query.kind === 'all') {
+        await runAllPlaylists(db, registry.providers, config, 'manual', log);
+      } else {
+        const kind: RunKind = req.query.kind === 'yesterday' ? 'yesterday' : 'dynamic';
         await runPlaylistJob(db, registry.providers, config, kind, 'manual', log);
       }
       return reply.redirect('/runs');

@@ -164,7 +164,10 @@ async function runDynamic(
   await updateDescription(
     provider,
     playlist.id,
-    `An eclectic music mix of college radio rock. A full day of music, updated daily. Last updated ${prettyDate(now, config.TZ_STATION)}.`,
+    config.DYNAMIC_PLAYLIST_DESCRIPTION.replaceAll(
+      '{date}',
+      prettyDate(now, config.TZ_STATION),
+    ),
     log,
   );
 
@@ -242,7 +245,10 @@ async function runYesterday(
   await updateDescription(
     provider,
     playlist.id,
-    `Every song identified on KZSU Zootopia on ${prettyDate(start, config.TZ_STATION)}. Last updated ${prettyDate(now, config.TZ_STATION)}.`,
+    config.YESTERDAY_PLAYLIST_DESCRIPTION.replaceAll(
+      '{airdate}',
+      prettyDate(start, config.TZ_STATION),
+    ).replaceAll('{date}', prettyDate(now, config.TZ_STATION)),
     log,
   );
 

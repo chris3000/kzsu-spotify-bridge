@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { DB } from '../src/db/client.js';
+import { kvSet, type DB } from '../src/db/client.js';
 import type { ProviderRegistry } from '../src/providers/registry.js';
 import { SpotifyAuth } from '../src/providers/spotify/auth.js';
 import { buildServer } from '../src/web/server.js';
@@ -78,6 +78,8 @@ describe('web server', () => {
   });
 
   it('renders the dashboard with stats', async () => {
+    // The sidebar's Spotify state is a pure DB check on the stored refresh token.
+    kvSet(db, 'spotify_refresh_token', 'test-refresh');
     insertTrack(db, { title: 'A', artist: 'B', status: 'matched' });
     const res = await authed('/');
     expect(res.statusCode).toBe(200);
@@ -86,10 +88,22 @@ describe('web server', () => {
   });
 
   it('shows a connect link when Spotify is not authorized', async () => {
-    provider.ready = false;
     const res = await authed('/');
     expect(res.body).toContain('spotify · connect');
     expect(res.body).toContain('/auth/spotify');
+  });
+
+  it('search form preserves advanced filters', async () => {
+    const res = await authed('/tracks?min_selected=5&added_after=2026-01-01');
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('name="min_selected" value="5"');
+    expect(res.body).toContain('name="added_after" value="2026-01-01"');
+  });
+
+  it('/plays shows a clean empty state', async () => {
+    const res = await authed('/plays');
+    expect(res.body).toContain('no results');
+    expect(res.body).not.toContain('1–0');
   });
 
   it('renders a track detail page', async () => {

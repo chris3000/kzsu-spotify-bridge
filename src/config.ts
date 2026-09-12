@@ -12,6 +12,17 @@ const envSchema = z.object({
   FEED_URL: z.string().url().default('http://kzsu.rocks/songs'),
   DYNAMIC_PLAYLIST_NAME: z.string().default('College Rock Dynamic Playlist'),
   YESTERDAY_PLAYLIST_NAME: z.string().default("KZSU Zootopia- Yesterday's Songs"),
+  // {date} = update date; {airdate} = the station-local day the tracks aired.
+  DYNAMIC_PLAYLIST_DESCRIPTION: z
+    .string()
+    .default(
+      'An eclectic music mix of college radio rock. A full day of music, updated daily. Last updated {date}.',
+    ),
+  YESTERDAY_PLAYLIST_DESCRIPTION: z
+    .string()
+    .default(
+      'Every song identified on KZSU Zootopia on {airdate}. Last updated {date}.',
+    ),
   PLAYLIST_SIZE: z.coerce.number().int().positive().default(150),
   COOLDOWN_DAYS: z.coerce.number().positive().default(14),
   STALENESS_HALF_DAYS: z.coerce.number().positive().default(30),

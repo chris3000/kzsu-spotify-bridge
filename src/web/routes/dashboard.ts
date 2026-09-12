@@ -2,7 +2,9 @@ import { TZDate } from '@date-fns/tz';
 import type { FastifyInstance } from 'fastify';
 import type { Config } from '../../config.js';
 import { kvGet, type DB } from '../../db/client.js';
+import { pacificDateString } from '../../playlists/runner.js';
 import type { ProviderRegistry } from '../../providers/registry.js';
+import { PLAYLIST_RUN_HOUR } from '../../scheduler/scheduler.js';
 import {
   badge,
   esc,
@@ -11,6 +13,7 @@ import {
   fmtNum,
   html,
   layout,
+  pagerFoot,
   raw,
   type NavCtx,
 } from '../views/html.js';
@@ -31,23 +34,40 @@ interface TrackFilters {
   page?: string;
 }
 
-async function navCtx(
+// Sidebar counts change only on ingest/playlist runs; a short cache keeps
+// navigation from re-scanning three tables (plays grows unboundedly).
+const COUNTS_TTL_MS = 10_000;
+const countsCache = new WeakMap<DB, { at: number; counts: NavCtx['counts'] }>();
+
+function navCounts(db: DB): NavCtx['counts'] {
+  const cached = countsCache.get(db);
+  if (cached && Date.now() - cached.at < COUNTS_TTL_MS) return cached.counts;
+  const count = (sql: string): number => (db.prepare(sql).get() as { c: number }).c;
+  const counts = {
+    tracks: count('SELECT COUNT(*) c FROM tracks'),
+    plays: count('SELECT COUNT(*) c FROM plays'),
+    runs: count('SELECT COUNT(*) c FROM playlist_runs'),
+  };
+  countsCache.set(db, { at: Date.now(), counts });
+  return counts;
+}
+
+function navCtx(
   db: DB,
   registry: ProviderRegistry,
   config: Config,
   active: NavCtx['active'],
-): Promise<NavCtx> {
-  const count = (sql: string): number => (db.prepare(sql).get() as { c: number }).c;
+): NavCtx {
   const local = new TZDate(Date.now(), config.TZ_STATION);
+  const runLabel = `${String(PLAYLIST_RUN_HOUR).padStart(2, '0')}:00`;
   return {
     active,
-    counts: {
-      tracks: count('SELECT COUNT(*) c FROM tracks'),
-      plays: count('SELECT COUNT(*) c FROM plays'),
-      runs: count('SELECT COUNT(*) c FROM playlist_runs'),
-    },
-    spotifyReady: await registry.providers[0]!.isReady(),
-    nextRunLabel: local.getHours() < 3 ? '03:00' : '03:00 +1d',
+    counts: navCounts(db),
+    // A pure DB check — never a network round-trip. Revoked tokens are
+    // cleared by SpotifyAuth on invalid_grant, so this stays truthful.
+    spotifyReady: registry.spotifyAuth.hasRefreshToken(),
+    nextRunLabel:
+      local.getHours() < PLAYLIST_RUN_HOUR ? runLabel : `${runLabel} +1d`,
   };
 }
 
@@ -60,7 +80,7 @@ export function registerDashboard(
   const tz = config.TZ_STATION;
 
   app.get('/', async (_req, reply) => {
-    const nav = await navCtx(db, registry, config, 'overview');
+    const nav = navCtx(db, registry, config, 'overview');
     const count = (sql: string, ...args: unknown[]): number =>
       (db.prepare(sql).get(...args) as { c: number }).c;
     const now = Math.floor(Date.now() / 1000);
@@ -80,18 +100,21 @@ export function registerDashboard(
     const lastIngest = Number(kvGet(db, 'last_ingest_at')) || null;
     const matchRate = total > 0 ? ((matched / total) * 100).toFixed(1) : '0.0';
 
-    // Tracks matched per day, last 14 station-local days.
-    const dayRows = db
-      .prepare(
-        `SELECT date(matched_at, 'unixepoch', 'localtime') d, COUNT(*) c
-         FROM provider_matches WHERE matched_at >= ?
-         GROUP BY d`,
-      )
-      .all(now - 14 * DAY) as { d: string; c: number }[];
-    const byDay = new Map(dayRows.map((r) => [r.d, r.c]));
+    // Tracks matched per day, last 14 station-local days. Bucketing happens
+    // in JS via the station timezone so SQL server-local dates can't skew it.
+    const matchEpochs = db
+      .prepare('SELECT matched_at FROM provider_matches WHERE matched_at >= ?')
+      .all(now - 15 * DAY) as { matched_at: number }[];
+    const byDay = new Map<string, number>();
+    for (const m of matchEpochs) {
+      const d = pacificDateString(m.matched_at, tz);
+      byDay.set(d, (byDay.get(d) ?? 0) + 1);
+    }
     const bars: { n: number; label: string }[] = [];
     for (let i = 13; i >= 0; i--) {
-      const d = new Date((now - i * DAY) * 1000).toISOString().slice(0, 10);
+      const day = new TZDate(now * 1000, tz);
+      day.setDate(day.getDate() - i);
+      const d = pacificDateString(Math.floor(day.getTime() / 1000), tz);
       bars.push({ n: byDay.get(d) ?? 0, label: d });
     }
     const barMax = Math.max(1, ...bars.map((b) => b.n));
@@ -226,7 +249,7 @@ export function registerDashboard(
   });
 
   app.get<{ Querystring: TrackFilters }>('/tracks', async (req, reply) => {
-    const nav = await navCtx(db, registry, config, 'tracks');
+    const nav = navCtx(db, registry, config, 'tracks');
     const q = req.query;
     const where: string[] = [];
     const args: unknown[] = [];
@@ -322,9 +345,15 @@ export function registerDashboard(
       <div class="toolbar">
         <form class="search" method="get" action="/tracks">
           <input type="search" name="q" value="${q.q ?? ''}" placeholder="Search artist or title…" />
+          <input type="text" name="year" value="${q.year ?? ''}" placeholder="Year" style="flex:none;width:70px" />
+          <input type="text" name="min_selected" value="${q.min_selected ?? ''}" placeholder="Min picks" style="flex:none;width:86px" />
+          <input type="date" name="added_after" value="${q.added_after ?? ''}" title="First heard after" style="flex:none" />
+          <input type="date" name="added_before" value="${q.added_before ?? ''}" title="First heard before" style="flex:none" />
+          <button class="btn" style="margin-left:6px">Filter</button>
           ${q.status ? raw(`<input type="hidden" name="status" value="${esc(q.status)}">`) : ''}
           ${q.sort ? raw(`<input type="hidden" name="sort" value="${esc(q.sort)}">`) : ''}
           ${q.dir ? raw(`<input type="hidden" name="dir" value="${esc(q.dir)}">`) : ''}
+          ${q.artist ? raw(`<input type="hidden" name="artist" value="${esc(q.artist)}">`) : ''}
         </form>
         <div class="chips">
           ${raw(
@@ -369,20 +398,20 @@ export function registerDashboard(
             )}
           </tbody>
         </table></div>
-        <div class="foot">
-          <span>${total === 0 ? 'no results' : `${from}–${to} of ${fmtNum(total)}`}</span>
-          <span class="pager">
-            ${page > 1 ? raw(`<a class="btn btn-sm" href="${esc(qs({ page: String(page - 1) }))}">prev</a>`) : ''}
-            ${to < total ? raw(`<a class="btn btn-sm" href="${esc(qs({ page: String(page + 1) }))}">next</a>`) : ''}
-          </span>
-        </div>
+        ${pagerFoot({
+          from,
+          to,
+          total,
+          prevHref: page > 1 ? qs({ page: String(page - 1) }) : null,
+          nextHref: to < total ? qs({ page: String(page + 1) }) : null,
+        })}
       </section>
     `;
     return reply.type('text/html').send(layout('Tracks', body, nav));
   });
 
   app.get<{ Params: { id: string } }>('/tracks/:id', async (req, reply) => {
-    const nav = await navCtx(db, registry, config, 'tracks');
+    const nav = navCtx(db, registry, config, 'tracks');
     const track = db
       .prepare('SELECT * FROM tracks WHERE id = ?')
       .get(Number(req.params.id)) as Record<string, unknown> | undefined;
@@ -449,7 +478,7 @@ export function registerDashboard(
   });
 
   app.get<{ Querystring: { page?: string } }>('/plays', async (req, reply) => {
-    const nav = await navCtx(db, registry, config, 'plays');
+    const nav = navCtx(db, registry, config, 'plays');
     const page = Math.max(1, Number(req.query.page) || 1);
     const rows = db
       .prepare(
@@ -458,7 +487,9 @@ export function registerDashboard(
          ORDER BY p.played_at DESC LIMIT ? OFFSET ?`,
       )
       .all(PAGE_SIZE, (page - 1) * PAGE_SIZE) as Record<string, unknown>[];
-    const from = (page - 1) * PAGE_SIZE + 1;
+    const total = nav.counts.plays;
+    const from = rows.length === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
+    const to = (page - 1) * PAGE_SIZE + rows.length;
 
     const body = html`
       <header class="page-head">
@@ -487,20 +518,20 @@ export function registerDashboard(
             )}
           </tbody>
         </table></div>
-        <div class="foot">
-          <span>${from}–${from + rows.length - 1} of ${fmtNum(nav.counts.plays)}</span>
-          <span class="pager">
-            ${page > 1 ? raw(`<a class="btn btn-sm" href="/plays?page=${page - 1}">prev</a>`) : ''}
-            ${rows.length === PAGE_SIZE ? raw(`<a class="btn btn-sm" href="/plays?page=${page + 1}">next</a>`) : ''}
-          </span>
-        </div>
+        ${pagerFoot({
+          from,
+          to,
+          total,
+          prevHref: page > 1 ? `/plays?page=${page - 1}` : null,
+          nextHref: to < total ? `/plays?page=${page + 1}` : null,
+        })}
       </section>
     `;
     return reply.type('text/html').send(layout('Plays', body, nav));
   });
 
   app.get('/runs', async (_req, reply) => {
-    const nav = await navCtx(db, registry, config, 'runs');
+    const nav = navCtx(db, registry, config, 'runs');
     const rows = db
       .prepare('SELECT * FROM playlist_runs ORDER BY started_at DESC LIMIT 100')
       .all() as Record<string, unknown>[];
@@ -541,7 +572,7 @@ export function registerDashboard(
   });
 
   app.get<{ Params: { id: string } }>('/runs/:id', async (req, reply) => {
-    const nav = await navCtx(db, registry, config, 'runs');
+    const nav = navCtx(db, registry, config, 'runs');
     const run = db
       .prepare('SELECT * FROM playlist_runs WHERE id = ?')
       .get(Number(req.params.id)) as Record<string, unknown> | undefined;

@@ -1,7 +1,7 @@
 # Litestream config. BUCKET_NAME / AWS_* env vars are set automatically by
 # `fly storage create` (Tigris); AWS creds are picked up from the environment.
 dbs:
-  - path: /data/kzsu.db
+  - path: ${DATABASE_PATH}
     replicas:
       - type: s3
         bucket: ${BUCKET_NAME}

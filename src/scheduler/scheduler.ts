@@ -14,6 +14,10 @@ import {
   runPlaylistJob,
 } from '../playlists/runner.js';
 
+/** Station-local hour of the daily playlist build — single source of truth
+ * shared with the dashboard's "next run" label. */
+export const PLAYLIST_RUN_HOUR = 3;
+
 /** Prevents overlapping executions of the same job on this single instance. */
 class JobLock {
   private running = new Set<string>();
@@ -74,15 +78,17 @@ export function startScheduler(
 
   const tasks = [
     cron.schedule('5 * * * *', ingestJob, { timezone: tz }),
-    cron.schedule('0 3 * * *', () => playlistJob('cron'), { timezone: tz }),
-    cron.schedule('0 4 * * *', retryJob, { timezone: tz }),
+    cron.schedule(`0 ${PLAYLIST_RUN_HOUR} * * *`, () => playlistJob('cron'), {
+      timezone: tz,
+    }),
+    cron.schedule(`0 ${PLAYLIST_RUN_HOUR + 1} * * *`, retryJob, { timezone: tz }),
   ];
 
   // Boot: ingest immediately (idempotent), and catch up on a missed 3am run.
   void ingestJob().then(() => {
     const now = Math.floor(Date.now() / 1000);
     const local = new TZDate(now * 1000, tz);
-    if (local.getHours() >= 3) {
+    if (local.getHours() >= PLAYLIST_RUN_HOUR) {
       const today = pacificDateString(now, tz);
       const dynamicDue = !hasSucceededToday(db, 'dynamic', today);
       const yesterdayDue = !hasSucceededToday(db, 'yesterday', today);

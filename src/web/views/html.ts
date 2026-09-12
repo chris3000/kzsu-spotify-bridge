@@ -273,6 +273,27 @@ export function fmtAgo(epoch: number | null): string {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
+/** Shared list-page pagination footer; handles the empty state. */
+export function pagerFoot(opts: {
+  from: number;
+  to: number;
+  total: number;
+  prevHref?: string | null;
+  nextHref?: string | null;
+}): Raw {
+  const label =
+    opts.total === 0 ? 'no results' : `${opts.from}–${opts.to} of ${fmtNum(opts.total)}`;
+  const prev = opts.prevHref
+    ? `<a class="btn btn-sm" href="${esc(opts.prevHref)}">prev</a>`
+    : '';
+  const next = opts.nextHref
+    ? `<a class="btn btn-sm" href="${esc(opts.nextHref)}">next</a>`
+    : '';
+  return raw(
+    `<div class="foot"><span>${esc(label)}</span><span class="pager">${prev}${next}</span></div>`,
+  );
+}
+
 export function badge(status: string): Raw {
   const cls = ['matched', 'unmatched', 'gave_up', 'success', 'failed', 'running'].includes(status)
     ? status
