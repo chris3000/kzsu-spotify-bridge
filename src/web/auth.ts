@@ -1,7 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Config } from '../config.js';
-import { html, layout } from './views/html.js';
+import { bareLayout, html } from './views/html.js';
 
 const SESSION_COOKIE = 'kzsu_session';
 const SESSION_VALUE = 'ok';
@@ -21,18 +21,23 @@ export function isAuthenticated(req: FastifyRequest): boolean {
 }
 
 function loginPage(error?: string): string {
-  return layout(
+  return bareLayout(
     'Log in',
     html`
-      <h1>Log in</h1>
-      ${error ? html`<div class="banner warn">${error}</div>` : ''}
-      <form method="post" action="/login">
-        <label>
-          Password
-          <input type="password" name="password" autofocus required />
-        </label>
-        <button type="submit">Log in</button>
-      </form>
+      <div class="login-card">
+        <div class="brand">
+          <div class="mark"></div>
+          <div>
+            <div class="name">Bridge</div>
+            <div class="sub">kzsu → spotify</div>
+          </div>
+        </div>
+        <form method="post" action="/login">
+          <input type="password" name="password" placeholder="Password" autofocus required />
+          <button type="submit" class="btn btn-primary" style="width:100%">Log in</button>
+        </form>
+        ${error ? html`<div class="banner-warn">${error}</div>` : ''}
+      </div>
     `,
   );
 }

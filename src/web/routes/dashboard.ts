@@ -1,12 +1,25 @@
+import { TZDate } from '@date-fns/tz';
 import type { FastifyInstance } from 'fastify';
 import type { Config } from '../../config.js';
 import { kvGet, type DB } from '../../db/client.js';
 import type { ProviderRegistry } from '../../providers/registry.js';
-import { esc, fmtEpoch, html, layout, raw } from '../views/html.js';
+import {
+  badge,
+  esc,
+  fmtAgo,
+  fmtEpoch,
+  fmtNum,
+  html,
+  layout,
+  raw,
+  type NavCtx,
+} from '../views/html.js';
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 25;
+const DAY = 86400;
 
 interface TrackFilters {
+  q?: string;
   artist?: string;
   year?: string;
   status?: string;
@@ -14,7 +27,28 @@ interface TrackFilters {
   added_before?: string;
   min_selected?: string;
   sort?: string;
+  dir?: string;
   page?: string;
+}
+
+async function navCtx(
+  db: DB,
+  registry: ProviderRegistry,
+  config: Config,
+  active: NavCtx['active'],
+): Promise<NavCtx> {
+  const count = (sql: string): number => (db.prepare(sql).get() as { c: number }).c;
+  const local = new TZDate(Date.now(), config.TZ_STATION);
+  return {
+    active,
+    counts: {
+      tracks: count('SELECT COUNT(*) c FROM tracks'),
+      plays: count('SELECT COUNT(*) c FROM plays'),
+      runs: count('SELECT COUNT(*) c FROM playlist_runs'),
+    },
+    spotifyReady: await registry.providers[0]!.isReady(),
+    nextRunLabel: local.getHours() < 3 ? '03:00' : '03:00 +1d',
+  };
 }
 
 export function registerDashboard(
@@ -26,87 +60,180 @@ export function registerDashboard(
   const tz = config.TZ_STATION;
 
   app.get('/', async (_req, reply) => {
+    const nav = await navCtx(db, registry, config, 'overview');
     const count = (sql: string, ...args: unknown[]): number =>
       (db.prepare(sql).get(...args) as { c: number }).c;
-
-    const total = count('SELECT COUNT(*) c FROM tracks');
-    const matched = count(`SELECT COUNT(*) c FROM tracks WHERE status = 'matched'`);
-    const unmatched = count(`SELECT COUNT(*) c FROM tracks WHERE status = 'unmatched'`);
-    const gaveUp = count(`SELECT COUNT(*) c FROM tracks WHERE status = 'gave_up'`);
-    const plays = count('SELECT COUNT(*) c FROM plays');
     const now = Math.floor(Date.now() / 1000);
-    const plays24h = count('SELECT COUNT(*) c FROM plays WHERE played_at >= ?', now - 86400);
+
+    const matched = count(`SELECT COUNT(*) c FROM tracks WHERE status = 'matched'`);
+    const unresolved = count(`SELECT COUNT(*) c FROM tracks WHERE status IN ('unmatched','gave_up')`);
+    const total = matched + unresolved;
+    const matchedWeek = count(
+      `SELECT COUNT(*) c FROM provider_matches WHERE matched_at >= ?`,
+      now - 7 * DAY,
+    );
+    const plays24h = count('SELECT COUNT(*) c FROM plays WHERE played_at >= ?', now - DAY);
+    const failedRuns = count(
+      `SELECT COUNT(*) c FROM playlist_runs WHERE status = 'failed' AND started_at >= ?`,
+      now - 7 * DAY,
+    );
     const lastIngest = Number(kvGet(db, 'last_ingest_at')) || null;
+    const matchRate = total > 0 ? ((matched / total) * 100).toFixed(1) : '0.0';
 
-    const lastRuns = db
+    // Tracks matched per day, last 14 station-local days.
+    const dayRows = db
       .prepare(
-        `SELECT kind, run_date, status, track_count, notes, error, started_at
-         FROM playlist_runs pr
-         WHERE started_at = (SELECT MAX(started_at) FROM playlist_runs WHERE kind = pr.kind)
-         ORDER BY kind`,
+        `SELECT date(matched_at, 'unixepoch', 'localtime') d, COUNT(*) c
+         FROM provider_matches WHERE matched_at >= ?
+         GROUP BY d`,
       )
-      .all() as {
-      kind: string;
-      run_date: string;
-      status: string;
-      track_count: number | null;
-      notes: string | null;
-      error: string | null;
-      started_at: number;
-    }[];
+      .all(now - 14 * DAY) as { d: string; c: number }[];
+    const byDay = new Map(dayRows.map((r) => [r.d, r.c]));
+    const bars: { n: number; label: string }[] = [];
+    for (let i = 13; i >= 0; i--) {
+      const d = new Date((now - i * DAY) * 1000).toISOString().slice(0, 10);
+      bars.push({ n: byDay.get(d) ?? 0, label: d });
+    }
+    const barMax = Math.max(1, ...bars.map((b) => b.n));
 
-    const spotifyReady = await registry.providers[0]!.isReady();
+    // Unresolved by cause, from retry-queue notes.
+    const causeRows = db
+      .prepare(
+        `SELECT ma.last_error e, COUNT(*) c
+         FROM match_attempts ma JOIN tracks t ON t.id = ma.track_id
+         WHERE t.status IN ('unmatched','gave_up')
+         GROUP BY ma.last_error`,
+      )
+      .all() as { e: string | null; c: number }[];
+    const causes = new Map<string, number>();
+    const bump = (k: string, n: number) => causes.set(k, (causes.get(k) ?? 0) + n);
+    for (const r of causeRows) {
+      const e = r.e ?? '';
+      if (e.includes('no candidates')) bump('No Spotify result', r.c);
+      else if (e.includes('near-miss')) bump('Near miss (review)', r.c);
+      else if (e.includes('below floor')) bump('Low similarity', r.c);
+      else bump('Other / pending', r.c);
+    }
+    const causeList = [...causes.entries()].sort((a, b) => b[1] - a[1]);
+    const causeMax = Math.max(1, ...causeList.map(([, n]) => n));
+
+    const recent = db
+      .prepare(
+        `SELECT p.track_id, p.played_at, p.raw_artist, p.raw_title, t.status
+         FROM plays p JOIN tracks t ON t.id = p.track_id
+         ORDER BY p.played_at DESC LIMIT 6`,
+      )
+      .all() as { track_id: number; played_at: number; raw_artist: string; raw_title: string; status: string }[];
 
     const body = html`
-      <h1>Dashboard</h1>
-      ${spotifyReady
-        ? raw('<div class="banner ok">Spotify: authorized ✓</div>')
-        : raw(
-            '<div class="banner warn">Spotify is not authorized — playlists cannot be updated. <a href="/auth/spotify">Connect Spotify</a></div>',
-          )}
-      <div class="tiles">
-        <div class="tile"><div class="num">${total}</div><div class="label">tracks in database</div></div>
-        <div class="tile"><div class="num">${matched}</div><div class="label">matched</div></div>
-        <div class="tile"><div class="num">${unmatched}</div><div class="label">unmatched</div></div>
-        <div class="tile"><div class="num">${gaveUp}</div><div class="label">gave up</div></div>
-        <div class="tile"><div class="num">${plays}</div><div class="label">plays recorded</div></div>
-        <div class="tile"><div class="num">${plays24h}</div><div class="label">plays last 24h</div></div>
-      </div>
-      <p class="muted">Last ingest: ${fmtEpoch(lastIngest, tz)}</p>
-      <h2>Latest playlist runs</h2>
-      <div class="overflow"><table>
-        <tr><th>Playlist</th><th>Run date</th><th>Status</th><th>Tracks</th><th>Notes</th><th>At</th></tr>
-        ${raw(
-          lastRuns
-            .map(
-              (r) => html`<tr>
-                <td>${r.kind}</td><td>${r.run_date}</td><td>${r.status}</td>
-                <td>${r.track_count ?? '—'}</td>
-                <td class="wrap">${r.notes ?? r.error ?? ''}</td>
-                <td>${fmtEpoch(r.started_at, tz)}</td>
-              </tr>`,
-            )
-            .join(''),
-        )}
-      </table></div>
-      <h2>Actions</h2>
-      <form method="post" action="/admin/rebuild?kind=dynamic" style="display:inline">
-        <button>Rebuild dynamic playlist now</button>
-      </form>
-      <form method="post" action="/admin/rebuild?kind=yesterday" style="display:inline">
-        <button>Rebuild yesterday playlist now</button>
-      </form>
-      <form method="post" action="/admin/retry-unmatched" style="display:inline">
-        <button>Retry all unmatched now</button>
-      </form>
+      <header class="page-head">
+        <div>
+          <h1>Overview</h1>
+          <p class="meta">last sync ${fmtAgo(lastIngest)} · ${plays24h} spins in 24h</p>
+        </div>
+        <div class="actions">
+          <form method="post" action="/admin/retry-unmatched"><button class="btn">Retry unmatched</button></form>
+          <form method="post" action="/admin/rebuild?kind=all"><button class="btn btn-primary">Rebuild playlists</button></form>
+        </div>
+      </header>
+
+      <section class="tiles">
+        <div class="tile">
+          <div class="label">Tracks matched</div>
+          <div class="num">${fmtNum(matched)}</div>
+          <div class="delta up">+${fmtNum(matchedWeek)} this week</div>
+        </div>
+        <div class="tile">
+          <div class="label">Match rate</div>
+          <div class="num">${matchRate}%</div>
+          <div class="delta">${fmtNum(unresolved)} unresolved</div>
+        </div>
+        <div class="tile">
+          <div class="label">Plays</div>
+          <div class="num">${fmtNum(nav.counts.plays)}</div>
+          <div class="delta up">+${fmtNum(plays24h)} last 24h</div>
+        </div>
+        <div class="tile">
+          <div class="label">Failed runs · 7d</div>
+          <div class="num">${fmtNum(failedRuns)}</div>
+          <div class="delta ${failedRuns > 0 ? 'warn' : ''}">
+            ${failedRuns > 0 ? 'needs attention' : 'all in sync'}
+          </div>
+        </div>
+      </section>
+
+      <section class="grid2">
+        <div class="card">
+          <div class="card-head">
+            <h2>Tracks matched</h2>
+            <span class="tag">14D</span>
+          </div>
+          <div class="bars">
+            ${raw(
+              bars
+                .map(
+                  (b) =>
+                    `<div class="bar" style="height:${Math.round((b.n / barMax) * 100)}%" title="${esc(`${b.n} matched · ${b.label}`)}"></div>`,
+                )
+                .join(''),
+            )}
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Unresolved by cause</h2></div>
+          <div class="causes">
+            ${raw(
+              causeList.length === 0
+                ? '<span class="tag">nothing unresolved</span>'
+                : causeList
+                    .map(
+                      ([name, n]) => html`<div class="cause">
+                        <span class="name">${name}</span>
+                        <span class="track"><span class="fill" style="width:${Math.round((n / causeMax) * 100)}%"></span></span>
+                        <span class="n">${n}</span>
+                      </div>`,
+                    )
+                    .join(''),
+            )}
+          </div>
+        </div>
+      </section>
+
+      <section class="tcard">
+        <div class="card-bar">
+          <h2>Recent spins</h2>
+          <a class="more" href="/tracks">all tracks →</a>
+        </div>
+        <div class="overflow"><table>
+          <tbody>
+            ${raw(
+              recent
+                .map(
+                  (r) => html`<tr class="click" data-href="/tracks/${r.track_id}">
+                    <td class="strong">${r.raw_artist}</td>
+                    <td>${r.raw_title}</td>
+                    <td class="mono">${fmtEpoch(r.played_at, tz)}</td>
+                    <td>${badge(r.status)}</td>
+                  </tr>`,
+                )
+                .join(''),
+            )}
+          </tbody>
+        </table></div>
+      </section>
     `;
-    return reply.type('text/html').send(layout('Dashboard', body));
+    return reply.type('text/html').send(layout('Overview', body, nav));
   });
 
   app.get<{ Querystring: TrackFilters }>('/tracks', async (req, reply) => {
+    const nav = await navCtx(db, registry, config, 'tracks');
     const q = req.query;
     const where: string[] = [];
     const args: unknown[] = [];
+    if (q.q) {
+      where.push('(t.artist LIKE ? OR t.title LIKE ?)');
+      args.push(`%${q.q}%`, `%${q.q}%`);
+    }
     if (q.artist) {
       where.push('t.artist LIKE ?');
       args.push(`%${q.artist}%`);
@@ -125,26 +252,30 @@ export function registerDashboard(
     }
     if (q.added_before) {
       where.push('t.date_added < ?');
-      args.push(Math.floor(new Date(q.added_before).getTime() / 1000) + 86400);
+      args.push(Math.floor(new Date(q.added_before).getTime() / 1000) + DAY);
     }
     if (q.min_selected && /^\d+$/.test(q.min_selected)) {
       where.push('t.times_selected >= ?');
       args.push(Number(q.min_selected));
     }
-    const sorts: Record<string, string> = {
-      added: 't.date_added DESC',
-      artist: 't.artist ASC, t.title ASC',
-      selected: 't.times_selected DESC',
-      last_selected: 't.last_selected_at DESC NULLS LAST',
+
+    const sortCols: Record<string, string> = {
+      artist: 't.artist',
+      title: 't.title',
+      year: 't.year',
+      added: 't.date_added',
+      picks: 't.times_selected',
+      last_picked: 't.last_selected_at',
+      status: 't.status',
     };
-    const orderBy = sorts[q.sort ?? ''] ?? sorts.added!;
+    const sortKey = sortCols[q.sort ?? ''] ? q.sort! : 'added';
+    const dir = q.dir === 'asc' ? 'ASC' : 'DESC';
+    const orderBy = `${sortCols[sortKey]} ${dir}${dir === 'DESC' ? ' NULLS LAST' : ''}`;
     const page = Math.max(1, Number(q.page) || 1);
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
     const total = (
-      db.prepare(`SELECT COUNT(*) c FROM tracks t ${whereSql}`).get(...args) as {
-        c: number;
-      }
+      db.prepare(`SELECT COUNT(*) c FROM tracks t ${whereSql}`).get(...args) as { c: number }
     ).c;
     const rows = db
       .prepare(
@@ -160,181 +291,300 @@ export function registerDashboard(
       for (const [k, v] of Object.entries({ ...q, ...overrides })) {
         if (v) params.set(k, String(v));
       }
-      return `/tracks?${params}`;
+      const s = params.toString();
+      return s ? `/tracks?${s}` : '/tracks';
     };
+    const sortLink = (key: string, label: string) => {
+      const on = sortKey === key;
+      const nextDir = on && dir === 'DESC' ? 'asc' : 'desc';
+      const arrow = on ? (dir === 'ASC' ? ' ↑' : ' ↓') : '';
+      return raw(
+        `<a class="${on ? 'on' : ''}" href="${esc(qs({ sort: key, dir: nextDir, page: '' }))}">${esc(label + arrow)}</a>`,
+      );
+    };
+    const chips: { key: string; label: string }[] = [
+      { key: '', label: 'all' },
+      { key: 'matched', label: 'matched' },
+      { key: 'unmatched', label: 'unmatched' },
+      { key: 'gave_up', label: 'gave up' },
+    ];
+    const from = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
+    const to = Math.min(total, page * PAGE_SIZE);
 
     const body = html`
-      <h1>Tracks <span class="muted">(${total})</span></h1>
-      <form class="filters" method="get" action="/tracks">
-        <label>Artist <input name="artist" value="${q.artist ?? ''}" /></label>
-        <label>Year <input name="year" value="${q.year ?? ''}" size="6" /></label>
-        <label>Status
-          <select name="status">
-            <option value="">any</option>
+      <header class="page-head">
+        <div>
+          <h1>Tracks</h1>
+          <p class="meta">${fmtNum(total)} records · ${q.status ? q.status.replace('_', ' ') : 'all statuses'}</p>
+        </div>
+      </header>
+
+      <div class="toolbar">
+        <form class="search" method="get" action="/tracks">
+          <input type="search" name="q" value="${q.q ?? ''}" placeholder="Search artist or title…" />
+          ${q.status ? raw(`<input type="hidden" name="status" value="${esc(q.status)}">`) : ''}
+          ${q.sort ? raw(`<input type="hidden" name="sort" value="${esc(q.sort)}">`) : ''}
+          ${q.dir ? raw(`<input type="hidden" name="dir" value="${esc(q.dir)}">`) : ''}
+        </form>
+        <div class="chips">
+          ${raw(
+            chips
+              .map(
+                (c) =>
+                  `<a class="chip ${(q.status ?? '') === c.key ? 'on' : ''}" href="${esc(qs({ status: c.key, page: '' }))}">${esc(c.label)}</a>`,
+              )
+              .join(''),
+          )}
+        </div>
+      </div>
+
+      <section class="tcard" style="margin-top:0">
+        <div class="overflow"><table>
+          <thead>
+            <tr>
+              <th>${sortLink('artist', 'Artist')}</th>
+              <th>${sortLink('title', 'Title')}</th>
+              <th>${sortLink('year', 'Year')}</th>
+              <th>${sortLink('added', 'First heard')}</th>
+              <th>${sortLink('picks', 'Picks')}</th>
+              <th>${sortLink('last_picked', 'Last picked')}</th>
+              <th>${sortLink('status', 'Match')}</th>
+            </tr>
+          </thead>
+          <tbody>
             ${raw(
-              ['matched', 'unmatched', 'gave_up']
+              rows
                 .map(
-                  (s) =>
-                    `<option value="${s}" ${q.status === s ? 'selected' : ''}>${s}</option>`,
+                  (t) => html`<tr class="click" data-href="/tracks/${t.id}">
+                    <td class="strong">${t.artist}</td>
+                    <td>${t.title}</td>
+                    <td class="mono">${t.year ?? '—'}</td>
+                    <td class="mono">${fmtEpoch(t.date_added as number, tz)}</td>
+                    <td class="mono">${t.times_selected}</td>
+                    <td class="mono">${fmtEpoch(t.last_selected_at as number | null, tz)}</td>
+                    <td>${badge(t.status as string)}</td>
+                  </tr>`,
                 )
                 .join(''),
             )}
-          </select>
-        </label>
-        <label>Added after <input type="date" name="added_after" value="${q.added_after ?? ''}" /></label>
-        <label>Added before <input type="date" name="added_before" value="${q.added_before ?? ''}" /></label>
-        <label>Min picks <input name="min_selected" value="${q.min_selected ?? ''}" size="4" /></label>
-        <label>Sort
-          <select name="sort">
-            ${raw(
-              Object.keys(sorts)
-                .map(
-                  (s) =>
-                    `<option value="${s}" ${q.sort === s ? 'selected' : ''}>${s}</option>`,
-                )
-                .join(''),
-            )}
-          </select>
-        </label>
-        <button>Filter</button>
-      </form>
-      <div class="overflow"><table>
-        <tr><th>Title</th><th>Artist</th><th>Year</th><th>Status</th><th>Added</th><th>Picks</th><th>Last picked</th><th></th></tr>
-        ${raw(
-          rows
-            .map(
-              (t) => html`<tr>
-                <td class="wrap">${t.title}</td>
-                <td class="wrap">${t.artist}</td>
-                <td>${t.year ?? ''}</td>
-                <td class="status-${t.status}">${t.status}</td>
-                <td>${fmtEpoch(t.date_added as number, tz)}</td>
-                <td>${t.times_selected}</td>
-                <td>${fmtEpoch(t.last_selected_at as number | null, tz)}</td>
-                <td>
-                  ${t.spotify_id
-                    ? raw(
-                        `<a href="https://open.spotify.com/track/${esc(t.spotify_id)}">spotify</a>`,
-                      )
-                    : raw(
-                        `<form method="post" action="/admin/retry-unmatched/${esc(t.id)}"><button>retry match</button></form>`,
-                      )}
-                </td>
-              </tr>`,
-            )
-            .join(''),
-        )}
-      </table></div>
-      <div class="pager">
-        ${page > 1 ? raw(`<a href="${esc(qs({ page: String(page - 1) }))}">← prev</a>`) : ''}
-        <span class="muted">page ${page} of ${Math.max(1, Math.ceil(total / PAGE_SIZE))}</span>
-        ${page * PAGE_SIZE < total
-          ? raw(`<a href="${esc(qs({ page: String(page + 1) }))}">next →</a>`)
-          : ''}
+          </tbody>
+        </table></div>
+        <div class="foot">
+          <span>${total === 0 ? 'no results' : `${from}–${to} of ${fmtNum(total)}`}</span>
+          <span class="pager">
+            ${page > 1 ? raw(`<a class="btn btn-sm" href="${esc(qs({ page: String(page - 1) }))}">prev</a>`) : ''}
+            ${to < total ? raw(`<a class="btn btn-sm" href="${esc(qs({ page: String(page + 1) }))}">next</a>`) : ''}
+          </span>
+        </div>
+      </section>
+    `;
+    return reply.type('text/html').send(layout('Tracks', body, nav));
+  });
+
+  app.get<{ Params: { id: string } }>('/tracks/:id', async (req, reply) => {
+    const nav = await navCtx(db, registry, config, 'tracks');
+    const track = db
+      .prepare('SELECT * FROM tracks WHERE id = ?')
+      .get(Number(req.params.id)) as Record<string, unknown> | undefined;
+    if (!track) return reply.code(404).send('track not found');
+    const match = db
+      .prepare(
+        `SELECT * FROM provider_matches WHERE track_id = ? AND provider = 'spotify'`,
+      )
+      .get(track.id) as Record<string, unknown> | undefined;
+    const attempt = db
+      .prepare('SELECT * FROM match_attempts WHERE track_id = ?')
+      .get(track.id) as Record<string, unknown> | undefined;
+    const playCount = (
+      db.prepare('SELECT COUNT(*) c FROM plays WHERE track_id = ?').get(track.id) as {
+        c: number;
+      }
+    ).c;
+
+    const fields: [string, string][] = [
+      ['artist', String(track.artist)],
+      ['year', track.year ? String(track.year) : '—'],
+      ['status', String(track.status).replace('_', ' ')],
+      ['first heard', fmtEpoch(track.date_added as number, tz)],
+      ['spins', String(playCount)],
+      ['picks', String(track.times_selected)],
+      ['last picked', fmtEpoch(track.last_selected_at as number | null, tz)],
+      [
+        'confidence',
+        match?.confidence != null ? `${Math.round(Number(match.confidence) * 100)}%` : '—',
+      ],
+      ['match note', attempt?.last_error ? String(attempt.last_error) : '—'],
+      ['spotify uri', match?.uri ? String(match.uri) : '—'],
+    ];
+
+    const body = html`
+      <div class="detail">
+        <div class="eyebrow">Spin record</div>
+        <h2>${track.title}</h2>
+        <div class="artist">${track.artist}</div>
+        <div class="fields">
+          ${raw(
+            fields
+              .map(
+                ([k, v]) =>
+                  html`<div class="field"><span class="k">${k}</span><span class="v">${v}</span></div>`,
+              )
+              .join(''),
+          )}
+        </div>
+        <div class="actions" style="margin-top:18px">
+          <form method="post" action="/admin/retry-unmatched/${track.id}">
+            <button class="btn btn-primary">Re-match</button>
+          </form>
+          ${match
+            ? raw(
+                `<a class="btn" href="https://open.spotify.com/track/${esc(match.provider_id)}">Open in Spotify</a>`,
+              )
+            : ''}
+          <a class="btn" href="/tracks">Back to tracks</a>
+        </div>
       </div>
     `;
-    return reply.type('text/html').send(layout('Tracks', body));
+    return reply.type('text/html').send(layout(String(track.title), body, nav));
   });
 
   app.get<{ Querystring: { page?: string } }>('/plays', async (req, reply) => {
+    const nav = await navCtx(db, registry, config, 'plays');
     const page = Math.max(1, Number(req.query.page) || 1);
     const rows = db
       .prepare(
-        `SELECT p.played_at, p.raw_artist, p.raw_title, t.status
+        `SELECT p.track_id, p.played_at, p.raw_artist, p.raw_title, t.status
          FROM plays p JOIN tracks t ON t.id = p.track_id
          ORDER BY p.played_at DESC LIMIT ? OFFSET ?`,
       )
       .all(PAGE_SIZE, (page - 1) * PAGE_SIZE) as Record<string, unknown>[];
+    const from = (page - 1) * PAGE_SIZE + 1;
+
     const body = html`
-      <h1>Recent plays</h1>
-      <div class="overflow"><table>
-        <tr><th>Aired</th><th>Artist</th><th>Title (raw)</th><th>Match status</th></tr>
-        ${raw(
-          rows
-            .map(
-              (p) => html`<tr>
-                <td>${fmtEpoch(p.played_at as number, tz)}</td>
-                <td class="wrap">${p.raw_artist}</td>
-                <td class="wrap">${p.raw_title}</td>
-                <td class="status-${p.status}">${p.status}</td>
-              </tr>`,
-            )
-            .join(''),
-        )}
-      </table></div>
-      <div class="pager">
-        ${page > 1 ? raw(`<a href="/plays?page=${page - 1}">← prev</a>`) : ''}
-        ${rows.length === PAGE_SIZE ? raw(`<a href="/plays?page=${page + 1}">next →</a>`) : ''}
-      </div>
+      <header class="page-head">
+        <div>
+          <h1>Plays</h1>
+          <p class="meta">${fmtNum(nav.counts.plays)} spins captured</p>
+        </div>
+      </header>
+      <section class="tcard" style="margin-top:0">
+        <div class="overflow"><table>
+          <thead>
+            <tr><th>Aired</th><th>Artist</th><th>Title (raw)</th><th>Match</th></tr>
+          </thead>
+          <tbody>
+            ${raw(
+              rows
+                .map(
+                  (p) => html`<tr class="click" data-href="/tracks/${p.track_id}">
+                    <td class="mono">${fmtEpoch(p.played_at as number, tz)}</td>
+                    <td class="strong">${p.raw_artist}</td>
+                    <td>${p.raw_title}</td>
+                    <td>${badge(p.status as string)}</td>
+                  </tr>`,
+                )
+                .join(''),
+            )}
+          </tbody>
+        </table></div>
+        <div class="foot">
+          <span>${from}–${from + rows.length - 1} of ${fmtNum(nav.counts.plays)}</span>
+          <span class="pager">
+            ${page > 1 ? raw(`<a class="btn btn-sm" href="/plays?page=${page - 1}">prev</a>`) : ''}
+            ${rows.length === PAGE_SIZE ? raw(`<a class="btn btn-sm" href="/plays?page=${page + 1}">next</a>`) : ''}
+          </span>
+        </div>
+      </section>
     `;
-    return reply.type('text/html').send(layout('Plays', body));
+    return reply.type('text/html').send(layout('Plays', body, nav));
   });
 
   app.get('/runs', async (_req, reply) => {
+    const nav = await navCtx(db, registry, config, 'runs');
     const rows = db
       .prepare('SELECT * FROM playlist_runs ORDER BY started_at DESC LIMIT 100')
       .all() as Record<string, unknown>[];
     const body = html`
-      <h1>Playlist runs</h1>
-      <div class="overflow"><table>
-        <tr><th>Id</th><th>Playlist</th><th>Run date</th><th>Status</th><th>Trigger</th><th>Tracks</th><th>Notes / error</th><th>Started</th></tr>
-        ${raw(
-          rows
-            .map(
-              (r) => html`<tr>
-                <td><a href="/runs/${r.id}">#${r.id}</a></td>
-                <td>${r.kind}</td>
-                <td>${r.run_date}</td>
-                <td>${r.status}</td>
-                <td>${r.trigger}</td>
-                <td>${r.track_count ?? '—'}</td>
-                <td class="wrap">${r.notes ?? r.error ?? ''}</td>
-                <td>${fmtEpoch(r.started_at as number, tz)}</td>
-              </tr>`,
-            )
-            .join(''),
-        )}
-      </table></div>
+      <header class="page-head">
+        <div>
+          <h1>Sync runs</h1>
+          <p class="meta">last 100 playlist builds</p>
+        </div>
+      </header>
+      <section class="tcard" style="margin-top:0">
+        <div class="overflow"><table>
+          <thead>
+            <tr><th>Run</th><th>Playlist</th><th>Date</th><th>Status</th><th>Trigger</th><th>Tracks</th><th>Notes</th><th>Started</th></tr>
+          </thead>
+          <tbody>
+            ${raw(
+              rows
+                .map(
+                  (r) => html`<tr class="click" data-href="/runs/${r.id}">
+                    <td class="mono">#${r.id}</td>
+                    <td class="strong">${r.kind}</td>
+                    <td class="mono">${r.run_date}</td>
+                    <td>${badge(r.status as string)}</td>
+                    <td class="mono">${r.trigger}</td>
+                    <td class="mono">${r.track_count ?? '—'}</td>
+                    <td class="dim">${r.notes ?? r.error ?? ''}</td>
+                    <td class="mono">${fmtEpoch(r.started_at as number, tz)}</td>
+                  </tr>`,
+                )
+                .join(''),
+            )}
+          </tbody>
+        </table></div>
+      </section>
     `;
-    return reply.type('text/html').send(layout('Playlist runs', body));
+    return reply.type('text/html').send(layout('Sync runs', body, nav));
   });
 
   app.get<{ Params: { id: string } }>('/runs/:id', async (req, reply) => {
+    const nav = await navCtx(db, registry, config, 'runs');
     const run = db
       .prepare('SELECT * FROM playlist_runs WHERE id = ?')
       .get(Number(req.params.id)) as Record<string, unknown> | undefined;
     if (!run) return reply.code(404).send('run not found');
     const entries = db
       .prepare(
-        `SELECT pe.position, t.title, t.artist, t.year
+        `SELECT pe.position, pe.track_id, t.title, t.artist, t.year
          FROM playlist_entries pe JOIN tracks t ON t.id = pe.track_id
          WHERE pe.run_id = ? ORDER BY pe.position`,
       )
       .all(run.id) as Record<string, unknown>[];
+
     const body = html`
-      <h1>Run #${run.id} — ${run.kind} (${run.run_date})</h1>
-      <p>
-        Status: ${run.status} · trigger: ${run.trigger} ·
-        ${run.track_count ?? 0} tracks
-        ${run.notes ? html` · ${run.notes}` : ''}
-        ${run.error ? html` · error: ${run.error}` : ''}
-      </p>
-      <div class="overflow"><table>
-        <tr><th>#</th><th>Title</th><th>Artist</th><th>Year</th></tr>
-        ${raw(
-          entries
-            .map(
-              (e) => html`<tr>
-                <td>${(e.position as number) + 1}</td>
-                <td class="wrap">${e.title}</td>
-                <td class="wrap">${e.artist}</td>
-                <td>${e.year ?? ''}</td>
-              </tr>`,
-            )
-            .join(''),
-        )}
-      </table></div>
+      <header class="page-head">
+        <div>
+          <h1>Run #${run.id} · ${run.kind}</h1>
+          <p class="meta">
+            ${run.run_date} · ${run.trigger} · ${run.track_count ?? 0} tracks
+            ${run.notes ? ` · ${run.notes}` : ''}${run.error ? ` · ${run.error}` : ''}
+          </p>
+        </div>
+        <div class="actions">${badge(run.status as string)}</div>
+      </header>
+      <section class="tcard" style="margin-top:0">
+        <div class="overflow"><table>
+          <thead><tr><th>#</th><th>Artist</th><th>Title</th><th>Year</th></tr></thead>
+          <tbody>
+            ${raw(
+              entries
+                .map(
+                  (e) => html`<tr class="click" data-href="/tracks/${e.track_id}">
+                    <td class="mono">${(e.position as number) + 1}</td>
+                    <td class="strong">${e.artist}</td>
+                    <td>${e.title}</td>
+                    <td class="mono">${e.year ?? '—'}</td>
+                  </tr>`,
+                )
+                .join(''),
+            )}
+          </tbody>
+        </table></div>
+      </section>
     `;
-    return reply.type('text/html').send(layout(`Run #${run.id}`, body));
+    return reply.type('text/html').send(layout(`Run #${run.id}`, body, nav));
   });
 }

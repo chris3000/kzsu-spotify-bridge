@@ -81,8 +81,24 @@ describe('web server', () => {
     insertTrack(db, { title: 'A', artist: 'B', status: 'matched' });
     const res = await authed('/');
     expect(res.statusCode).toBe(200);
-    expect(res.body).toContain('tracks in database');
-    expect(res.body).toContain('Spotify: authorized');
+    expect(res.body).toContain('Tracks matched');
+    expect(res.body).toContain('spotify · linked');
+  });
+
+  it('shows a connect link when Spotify is not authorized', async () => {
+    provider.ready = false;
+    const res = await authed('/');
+    expect(res.body).toContain('spotify · connect');
+    expect(res.body).toContain('/auth/spotify');
+  });
+
+  it('renders a track detail page', async () => {
+    const id = insertTrack(db, { title: 'Orange', artist: 'Big Thief', status: 'matched' });
+    addSpotifyMatch(db, id, 'sp1');
+    const res = await authed(`/tracks/${id}`);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('Spin record');
+    expect(res.body).toContain('Open in Spotify');
   });
 
   it('filters tracks by status and artist', async () => {

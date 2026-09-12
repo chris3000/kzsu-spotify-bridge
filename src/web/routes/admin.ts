@@ -16,17 +16,17 @@ export function registerAdmin(
   app.post<{ Querystring: { kind?: string } }>(
     '/admin/rebuild',
     async (req, reply) => {
-      const kind = req.query.kind === 'yesterday' ? 'yesterday' : 'dynamic';
       // Run in the request so the redirect lands after the run is recorded;
       // Spotify pushes take a few seconds at most.
-      await runPlaylistJob(
-        db,
-        registry.providers,
-        config,
-        kind as RunKind,
-        'manual',
-        log,
-      );
+      const kinds: RunKind[] =
+        req.query.kind === 'all'
+          ? ['dynamic', 'yesterday']
+          : req.query.kind === 'yesterday'
+            ? ['yesterday']
+            : ['dynamic'];
+      for (const kind of kinds) {
+        await runPlaylistJob(db, registry.providers, config, kind, 'manual', log);
+      }
       return reply.redirect('/runs');
     },
   );
